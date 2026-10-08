@@ -1,0 +1,486 @@
+
+--[[
+    AUTO PLAYER ESP
+    Updated Chams ESP
+
+    Features:
+    - Automatically detects existing players
+    - Instantly detects new players
+    - Reapplies ESP when players respawn
+    - Removes ESP when players leave
+    - Team checking
+    - Team colors
+    - Always On Top / Through Walls
+    - Custom fill and outline colors
+    - Custom transparency
+    - Draggable GUI
+    - RightShift to show/hide GUI
+]]
+
+-- SERVICES
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- SETTINGS
+local Settings = {
+    Enabled = true,
+    TeamCheck = false,
+    TeamColor = false,
+    AlwaysShow = true,
+
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    OutlineTransparency = 0,
+
+    FillColor = Color3.fromRGB(0, 100, 100),
+    FillTransparency = 0.5
+}
+
+-- CLEAN OLD GUI AND STORAGE
+local oldGui = PlayerGui:FindFirstChild("AutoESP_GUI")
+if oldGui then
+    oldGui:Destroy()
+end
+
+local oldStorage = workspace:FindFirstChild("AutoESP_Storage")
+if oldStorage then
+    oldStorage:Destroy()
+end
+
+-- ESP STORAGE
+local Storage = Instance.new("Folder")
+Storage.Name = "AutoESP_Storage"
+Storage.Parent = workspace
+
+local TrackedPlayers = {}
+
+-- UPDATE PLAYER ESP
+local function updateESP(player)
+    local data = TrackedPlayers[player]
+    if not data then
+        return
+    end
+
+    local highlight = data.Highlight
+    local character = data.Character
+
+    local enabled = Settings.Enabled and character ~= nil
+
+    -- Team filtering
+    if Settings.TeamCheck and LocalPlayer.Team ~= nil then
+        if player.Team == LocalPlayer.Team then
+            enabled = false
+        end
+    end
+
+    -- Health checking
+    if character then
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+        if humanoid and humanoid.Health <= 0 then
+            enabled = false
+        end
+    end
+
+    highlight.Enabled = enabled
+
+    -- Through walls
+    if Settings.AlwaysShow then
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    else
+        highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+    end
+
+    -- Team color or custom color
+    if Settings.TeamColor then
+        highlight.OutlineColor = player.TeamColor.Color
+    else
+        highlight.OutlineColor = Settings.OutlineColor
+    end
+
+    highlight.FillColor = Settings.FillColor
+    highlight.FillTransparency = Settings.FillTransparency
+    highlight.OutlineTransparency = Settings.OutlineTransparency
+end
+
+-- UPDATE ALL PLAYERS
+local function updateAllESP()
+    for player in pairs(TrackedPlayers) do
+        updateESP(player)
+    end
+end
+
+-- ATTACH ESP TO CHARACTER
+local function attachCharacter(player, character)
+    local data = TrackedPlayers[player]
+    if not data then
+        return
+    end
+
+    -- Disconnect previous health listener
+    if data.HealthConnection then
+        data.HealthConnection:Disconnect()
+        data.HealthConnection = nil
+    end
+
+    data.Character = character
+    data.Highlight.Adornee = character
+
+    updateESP(player)
+
+    -- Monitor health after character loads
+    task.spawn(function()
+        local humanoid = character:WaitForChild("Humanoid", 10)
+
+        if not humanoid then
+            return
+        end
+
+        if TrackedPlayers[player] ~= data then
+            return
+        end
+
+        if data.Character ~= character then
+            return
+        end
+
+        data.HealthConnection = humanoid.HealthChanged:Connect(function()
+            updateESP(player)
+        end)
+
+        updateESP(player)
+    end)
+end
+
+-- REGISTER PLAYER
+local function addPlayer(player)
+    -- Ignore local player
+    if player == LocalPlayer then
+        return
+    end
+
+    -- Prevent duplicate tracking
+    if TrackedPlayers[player] then
+        return
+    end
+
+    -- Create highlight
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESP_" .. player.Name
+    highlight.Enabled = false
+    highlight.FillColor = Settings.FillColor
+    highlight.OutlineColor = Settings.OutlineColor
+    highlight.FillTransparency = Settings.FillTransparency
+    highlight.OutlineTransparency = Settings.OutlineTransparency
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.Parent = Storage
+
+    local data = {
+        Highlight = highlight,
+        Character = nil,
+        Connections = {},
+        HealthConnection = nil
+    }
+
+    TrackedPlayers[player] = data
+
+    -- Detect respawning
+    table.insert(
+        data.Connections,
+        player.CharacterAdded:Connect(function(character)
+            attachCharacter(player, character)
+        end)
+    )
+
+    -- Detect character removal
+    table.insert(
+        data.Connections,
+        player.CharacterRemoving:Connect(function(character)
+            if data.Character == character then
+                data.Character = nil
+                data.Highlight.Adornee = nil
+
+                if data.HealthConnection then
+                    data.HealthConnection:Disconnect()
+                    data.HealthConnection = nil
+                end
+
+                updateESP(player)
+            end
+        end)
+    )
+
+    -- Detect team changes
+    table.insert(
+        data.Connections,
+        player:GetPropertyChangedSignal("Team"):Connect(function()
+            updateESP(player)
+        end)
+    )
+
+    -- Attach existing character
+    if player.Character then
+        attachCharacter(player, player.Character)
+    end
+
+    print("[AUTO ESP] Tracking:", player.Name)
+end
+
+-- REMOVE PLAYER
+local function removePlayer(player)
+    local data = TrackedPlayers[player]
+    if not data then
+        return
+    end
+
+    -- Disconnect events
+    for _, connection in ipairs(data.Connections) do
+        connection:Disconnect()
+    end
+
+    if data.HealthConnection then
+        data.HealthConnection:Disconnect()
+    end
+
+    -- Destroy highlight
+    if data.Highlight then
+        data.Highlight:Destroy()
+    end
+
+    TrackedPlayers[player] = nil
+
+    print("[AUTO ESP] Removed:", player.Name)
+end
+
+-- DETECT EXISTING PLAYERS
+for _, player in ipairs(Players:GetPlayers()) do
+    addPlayer(player)
+end
+
+-- DETECT NEW PLAYERS INSTANTLY
+Players.PlayerAdded:Connect(function(player)
+    addPlayer(player)
+end)
+
+-- DETECT LEAVING PLAYERS
+Players.PlayerRemoving:Connect(function(player)
+    removePlayer(player)
+end)
+
+-- LOCAL TEAM CHANGES
+LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+    updateAllESP()
+end)
+
+-- ==========================================
+-- GUI
+-- ==========================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoESP_GUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(270, 365)
+Main.Position = UDim2.new(0.5, -135, 0.5, -182)
+Main.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 8)
+Corner.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 38)
+Title.BackgroundTransparency = 1
+Title.Text = "AUTO PLAYER ESP"
+Title.TextColor3 = Color3.fromRGB(0, 220, 255)
+Title.TextSize = 18
+Title.Font = Enum.Font.GothamBold
+Title.Parent = Main
+
+local Container = Instance.new("Frame")
+Container.BackgroundTransparency = 1
+Container.Position = UDim2.fromOffset(10, 43)
+Container.Size = UDim2.new(1, -20, 1, -48)
+Container.Parent = Main
+
+local Layout = Instance.new("UIListLayout")
+Layout.Padding = UDim.new(0, 5)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Parent = Container
+
+-- CREATE TOGGLE
+local function createToggle(text, setting)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 0, 30)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 13
+    button.TextColor3 = Color3.new(1, 1, 1)
+    button.BorderSizePixel = 0
+    button.Parent = Container
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = button
+
+    local function refresh()
+        local enabled = Settings[setting]
+
+        button.Text = text .. ": " .. (enabled and "ON" or "OFF")
+
+        button.BackgroundColor3 = enabled
+            and Color3.fromRGB(25, 115, 75)
+            or Color3.fromRGB(65, 65, 70)
+    end
+
+    button.MouseButton1Click:Connect(function()
+        Settings[setting] = not Settings[setting]
+
+        refresh()
+        updateAllESP()
+    end)
+
+    refresh()
+end
+
+-- CREATE TEXT INPUT
+local function createInput(labelText, defaultText, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 30)
+    row.BackgroundTransparency = 1
+    row.Parent = Container
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.52, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 12
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = row
+
+    local input = Instance.new("TextBox")
+    input.Size = UDim2.new(0.48, 0, 1, 0)
+    input.Position = UDim2.new(0.52, 0, 0, 0)
+    input.BackgroundColor3 = Color3.fromRGB(55, 55, 60)
+    input.TextColor3 = Color3.new(1, 1, 1)
+    input.Font = Enum.Font.Gotham
+    input.TextSize = 12
+    input.ClearTextOnFocus = false
+    input.Text = defaultText
+    input.Parent = row
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = input
+
+    input.FocusLost:Connect(function()
+        local success = callback(input.Text)
+
+        if not success then
+            input.Text = defaultText
+        else
+            defaultText = input.Text
+            updateAllESP()
+        end
+    end)
+end
+
+-- RGB PARSER
+local function parseRGB(text)
+    local r, g, b = text:match(
+        "^%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*$"
+    )
+
+    if not r then
+        return nil
+    end
+
+    r = math.clamp(tonumber(r), 0, 255)
+    g = math.clamp(tonumber(g), 0, 255)
+    b = math.clamp(tonumber(b), 0, 255)
+
+    return Color3.fromRGB(r, g, b)
+end
+
+-- TOGGLES
+createToggle("Enable ESP", "Enabled")
+createToggle("Team Check", "TeamCheck")
+createToggle("Team Color", "TeamColor")
+createToggle("Always Show", "AlwaysShow")
+
+-- FILL TRANSPARENCY
+createInput("Fill Transparency", "0.5", function(text)
+    local value = tonumber(text)
+
+    if not value then
+        return false
+    end
+
+    Settings.FillTransparency = math.clamp(value, 0, 1)
+    return true
+end)
+
+-- OUTLINE TRANSPARENCY
+createInput("Outline Transparency", "0", function(text)
+    local value = tonumber(text)
+
+    if not value then
+        return false
+    end
+
+    Settings.OutlineTransparency = math.clamp(value, 0, 1)
+    return true
+end)
+
+-- FILL COLOR
+createInput("Fill RGB", "0,100,100", function(text)
+    local color = parseRGB(text)
+
+    if not color then
+        return false
+    end
+
+    Settings.FillColor = color
+    return true
+end)
+
+-- OUTLINE COLOR
+createInput("Outline RGB", "255,255,255", function(text)
+    local color = parseRGB(text)
+
+    if not color then
+        return false
+    end
+
+    Settings.OutlineColor = color
+    return true
+end)
+
+-- SHOW/HIDE GUI
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        Main.Visible = not Main.Visible
+    end
+end)
+
+-- INITIAL UPDATE
+updateAllESP()
+
+print("[AUTO ESP] Successfully loaded!")
+print("[AUTO ESP] New player detection active.")
+print("[AUTO ESP] Press RightShift to toggle GUI.")
