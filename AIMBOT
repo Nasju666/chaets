@@ -1,0 +1,905 @@
+
+--[[
+    AIMBOT V7
+    HEAD / BODY / ARMS / RANDOM
+
+    NEW:
+    T = Toggle Aimbot ON/OFF
+    GUI stays synchronized with T
+
+    CONTROLS:
+    T = Toggle Aimbot
+    B = Next Aim Mode
+    V = Previous Aim Mode
+    RMB = Hold to Aim
+    LMB = Reroll Random Aim Part
+    RightShift = Show/Hide GUI
+
+    FEATURES:
+    - Head / Body / Arms / Random
+    - Random reroll per left click
+    - R6 and R15 support
+    - Team checking
+    - Wall checking
+    - FOV circle
+    - Smooth aiming
+    - Draggable GUI
+]]
+
+-- =====================================
+-- SERVICES
+-- =====================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- =====================================
+-- SETTINGS
+-- =====================================
+
+local Settings = {
+    Enabled = false,
+    TeamCheck = false,
+    WallCheck = true,
+
+    AimMode = "Random",
+
+    Fov = 200,
+    ShowFov = true,
+    Smoothing = 15
+}
+
+local Modes = {
+    "Head",
+    "Body",
+    "Arms",
+    "Random"
+}
+
+local RNG = Random.new()
+
+local LockedPlayer = nil
+local LockedPart = nil
+
+local ModeButton
+local refreshAimbotButton
+
+-- =====================================
+-- CLEAN PREVIOUS VERSION
+-- =====================================
+
+for _, name in ipairs({
+    "AimbotV6_GUI",
+    "AimbotV6_FOV",
+    "AimbotV7_GUI",
+    "AimbotV7_FOV"
+}) do
+    local old = PlayerGui:FindFirstChild(name)
+
+    if old then
+        old:Destroy()
+    end
+end
+
+RunService:UnbindFromRenderStep("AimbotV6_Update")
+RunService:UnbindFromRenderStep("AimbotV7_Update")
+
+-- =====================================
+-- CHARACTER UTILITIES
+-- =====================================
+
+local function getBodyPart(character)
+    return character:FindFirstChild("UpperTorso")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getLeftArm(character)
+    return character:FindFirstChild("LeftUpperArm")
+        or character:FindFirstChild("LeftLowerArm")
+        or character:FindFirstChild("LeftHand")
+        or character:FindFirstChild("Left Arm")
+end
+
+local function getRightArm(character)
+    return character:FindFirstChild("RightUpperArm")
+        or character:FindFirstChild("RightLowerArm")
+        or character:FindFirstChild("RightHand")
+        or character:FindFirstChild("Right Arm")
+end
+
+local function getCandidates(character, mode)
+    local candidates = {}
+
+    if not character then
+        return candidates
+    end
+
+    local function add(modeName, part)
+        if part then
+            table.insert(candidates, {
+                Mode = modeName,
+                Part = part
+            })
+        end
+    end
+
+    if mode == "Head" or mode == "Random" then
+        add("Head", character:FindFirstChild("Head"))
+    end
+
+    if mode == "Body" or mode == "Random" then
+        add("Body", getBodyPart(character))
+    end
+
+    if mode == "Arms" or mode == "Random" then
+        add("Arms", getLeftArm(character))
+        add("Arms", getRightArm(character))
+    end
+
+    return candidates
+end
+
+-- =====================================
+-- TARGET VALIDATION
+-- =====================================
+
+local function isValidTarget(player)
+    if player == LocalPlayer then
+        return false
+    end
+
+    local character = player.Character
+
+    if not character then
+        return false
+    end
+
+    local humanoid =
+        character:FindFirstChildOfClass("Humanoid")
+
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+
+    if Settings.TeamCheck
+        and LocalPlayer.Team ~= nil
+        and player.Team == LocalPlayer.Team then
+        return false
+    end
+
+    return true
+end
+
+-- =====================================
+-- WALL CHECK
+-- =====================================
+
+local function isVisible(player, part)
+    if not Settings.WallCheck then
+        return true
+    end
+
+    local camera = workspace.CurrentCamera
+
+    if not camera or not part then
+        return false
+    end
+
+    local origin = camera.CFrame.Position
+    local direction = part.Position - origin
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+
+    params.FilterDescendantsInstances =
+        LocalPlayer.Character
+        and {LocalPlayer.Character}
+        or {}
+
+    params.IgnoreWater = true
+
+    local result = workspace:Raycast(
+        origin,
+        direction,
+        params
+    )
+
+    return result == nil
+        or (
+            player.Character ~= nil
+            and result.Instance:IsDescendantOf(
+                player.Character
+            )
+        )
+end
+
+-- =====================================
+-- FOV CHECK
+-- =====================================
+
+local function isInsideFov(part)
+    local camera = workspace.CurrentCamera
+
+    if not camera or not part then
+        return false, math.huge
+    end
+
+    local screenPos, onScreen =
+        camera:WorldToViewportPoint(part.Position)
+
+    if not onScreen then
+        return false, math.huge
+    end
+
+    local mouse = UIS:GetMouseLocation()
+
+    local distance = (
+        Vector2.new(screenPos.X, screenPos.Y)
+        - mouse
+    ).Magnitude
+
+    return distance <= Settings.Fov, distance
+end
+
+-- =====================================
+-- TARGET MANAGEMENT
+-- =====================================
+
+local function clearTarget()
+    LockedPlayer = nil
+    LockedPart = nil
+end
+
+local function findClosestTarget()
+    local closestPlayer = nil
+    local closestDistance = Settings.Fov
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isValidTarget(player) then
+
+            local candidates = getCandidates(
+                player.Character,
+                Settings.AimMode
+            )
+
+            for _, candidate in ipairs(candidates) do
+                local part = candidate.Part
+
+                local inside, distance =
+                    isInsideFov(part)
+
+                if inside
+                    and distance < closestDistance
+                    and isVisible(player, part) then
+
+                    closestDistance = distance
+                    closestPlayer = player
+                end
+            end
+        end
+    end
+
+    return closestPlayer
+end
+
+-- =====================================
+-- RANDOM HEAD / BODY / ARMS
+-- =====================================
+
+local function chooseTargetPart(player)
+    if not player or not player.Character then
+        return nil
+    end
+
+    local candidates = getCandidates(
+        player.Character,
+        Settings.AimMode
+    )
+
+    local available = {}
+
+    for _, candidate in ipairs(candidates) do
+        local inside = isInsideFov(candidate.Part)
+
+        if inside
+            and isVisible(player, candidate.Part) then
+
+            table.insert(available, candidate)
+        end
+    end
+
+    if #available == 0 then
+        return nil
+    end
+
+    -- RANDOM MODE
+    if Settings.AimMode == "Random" then
+        local availableModes = {}
+        local seen = {}
+
+        for _, candidate in ipairs(available) do
+            if not seen[candidate.Mode] then
+                seen[candidate.Mode] = true
+
+                table.insert(
+                    availableModes,
+                    candidate.Mode
+                )
+            end
+        end
+
+        local selectedMode = availableModes[
+            RNG:NextInteger(1, #availableModes)
+        ]
+
+        local modeCandidates = {}
+
+        for _, candidate in ipairs(available) do
+            if candidate.Mode == selectedMode then
+                table.insert(
+                    modeCandidates,
+                    candidate.Part
+                )
+            end
+        end
+
+        return modeCandidates[
+            RNG:NextInteger(1, #modeCandidates)
+        ]
+    end
+
+    -- ARMS MODE
+    if Settings.AimMode == "Arms" then
+        return available[
+            RNG:NextInteger(1, #available)
+        ].Part
+    end
+
+    -- HEAD OR BODY
+    return available[1].Part
+end
+
+-- =====================================
+-- SMOOTH CAMERA AIMING
+-- =====================================
+
+local function aimAt(part, dt)
+    local camera = workspace.CurrentCamera
+
+    if not camera or not part then
+        return
+    end
+
+    local current = camera.CFrame
+
+    local desired = CFrame.lookAt(
+        current.Position,
+        part.Position
+    )
+
+    if Settings.Smoothing <= 0 then
+        camera.CFrame = desired
+        return
+    end
+
+    local alpha = 1 - math.exp(
+        -Settings.Smoothing * dt
+    )
+
+    camera.CFrame = current:Lerp(
+        desired,
+        math.clamp(alpha, 0, 1)
+    )
+end
+
+-- =====================================
+-- MODE SWITCHING
+-- =====================================
+
+local function updateModeButton()
+    if ModeButton then
+        ModeButton.Text =
+            "Aim Mode: "
+            .. Settings.AimMode
+            .. " [V/B]"
+    end
+end
+
+local function switchAimMode(direction)
+    direction = direction or 1
+
+    local currentIndex =
+        table.find(Modes, Settings.AimMode) or 1
+
+    local nextIndex =
+        ((currentIndex - 1 + direction) % #Modes) + 1
+
+    Settings.AimMode = Modes[nextIndex]
+
+    clearTarget()
+    updateModeButton()
+
+    print("[AIMBOT V7] Mode:", Settings.AimMode)
+end
+
+-- =====================================
+-- AIMBOT ON/OFF TOGGLE
+-- =====================================
+
+local function setAimbotEnabled(enabled)
+    Settings.Enabled = enabled
+
+    -- Remove current target on state change
+    clearTarget()
+
+    -- Update GUI button
+    if refreshAimbotButton then
+        refreshAimbotButton()
+    end
+
+    print(
+        "[AIMBOT V7] Aimbot:",
+        Settings.Enabled and "ON" or "OFF"
+    )
+end
+
+local function toggleAimbot()
+    setAimbotEnabled(not Settings.Enabled)
+end
+
+-- =====================================
+-- REROLL RANDOM PART PER LEFT CLICK
+-- =====================================
+
+local function rerollAimPart()
+    if not Settings.Enabled then
+        return
+    end
+
+    if Settings.AimMode ~= "Random" then
+        return
+    end
+
+    if not UIS:IsMouseButtonPressed(
+        Enum.UserInputType.MouseButton2
+    ) then
+        return
+    end
+
+    if not LockedPlayer
+        or not isValidTarget(LockedPlayer) then
+
+        clearTarget()
+        LockedPlayer = findClosestTarget()
+    end
+
+    if not LockedPlayer then
+        return
+    end
+
+    local newPart = chooseTargetPart(LockedPlayer)
+
+    if newPart then
+        LockedPart = newPart
+
+        print(
+            "[AIMBOT V7] Random shot:",
+            LockedPlayer.Name,
+            "| Part:",
+            LockedPart.Name
+        )
+    end
+end
+
+-- =====================================
+-- FOV GUI
+-- =====================================
+
+local FovGui = Instance.new("ScreenGui")
+FovGui.Name = "AimbotV7_FOV"
+FovGui.IgnoreGuiInset = true
+FovGui.ResetOnSpawn = false
+FovGui.Parent = PlayerGui
+
+local FovCircle = Instance.new("Frame")
+FovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FovCircle.BackgroundTransparency = 1
+FovCircle.BorderSizePixel = 0
+FovCircle.Parent = FovGui
+
+local CircleCorner = Instance.new("UICorner")
+CircleCorner.CornerRadius = UDim.new(1, 0)
+CircleCorner.Parent = FovCircle
+
+local CircleStroke = Instance.new("UIStroke")
+CircleStroke.Color = Color3.fromRGB(0, 220, 255)
+CircleStroke.Thickness = 1.5
+CircleStroke.Transparency = 0.2
+CircleStroke.Parent = FovCircle
+
+-- =====================================
+-- MAIN AIM LOOP
+-- =====================================
+
+RunService:BindToRenderStep(
+    "AimbotV7_Update",
+    Enum.RenderPriority.Camera.Value + 1,
+    function(dt)
+
+        local mouse = UIS:GetMouseLocation()
+
+        FovCircle.Visible = Settings.ShowFov
+
+        FovCircle.Position = UDim2.fromOffset(
+            mouse.X,
+            mouse.Y
+        )
+
+        FovCircle.Size = UDim2.fromOffset(
+            Settings.Fov * 2,
+            Settings.Fov * 2
+        )
+
+        -- Require RMB and enabled state
+        local aiming =
+            Settings.Enabled
+            and UIS:IsMouseButtonPressed(
+                Enum.UserInputType.MouseButton2
+            )
+            and UIS:GetFocusedTextBox() == nil
+
+        if not aiming then
+            clearTarget()
+            return
+        end
+
+        -- Find target
+        if not LockedPlayer
+            or not isValidTarget(LockedPlayer) then
+
+            clearTarget()
+            LockedPlayer = findClosestTarget()
+
+            if LockedPlayer then
+                LockedPart = chooseTargetPart(
+                    LockedPlayer
+                )
+            end
+        end
+
+        if not LockedPlayer or not LockedPart then
+            clearTarget()
+            return
+        end
+
+        local character = LockedPlayer.Character
+
+        if not character
+            or not LockedPart:IsDescendantOf(character) then
+
+            clearTarget()
+            return
+        end
+
+        if not isVisible(LockedPlayer, LockedPart) then
+            clearTarget()
+            return
+        end
+
+        aimAt(LockedPart, dt)
+    end
+)
+
+Players.PlayerRemoving:Connect(function(player)
+    if player == LockedPlayer then
+        clearTarget()
+    end
+end)
+
+-- =====================================
+-- MAIN GUI
+-- =====================================
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "AimbotV7_GUI"
+Gui.ResetOnSpawn = false
+Gui.Parent = PlayerGui
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(270, 380)
+Main.Position = UDim2.new(0.5, -135, 0.5, -190)
+Main.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Parent = Gui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 40)
+Title.BackgroundTransparency = 1
+Title.Text = "AIMBOT V7"
+Title.TextColor3 = Color3.fromRGB(0, 220, 255)
+Title.TextSize = 19
+Title.Font = Enum.Font.GothamBold
+Title.Active = true
+Title.Parent = Main
+
+local Container = Instance.new("Frame")
+Container.Position = UDim2.fromOffset(12, 45)
+Container.Size = UDim2.new(1, -24, 1, -55)
+Container.BackgroundTransparency = 1
+Container.Parent = Main
+
+local Layout = Instance.new("UIListLayout")
+Layout.Padding = UDim.new(0, 6)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Parent = Container
+
+-- =====================================
+-- BUTTON CREATOR
+-- =====================================
+
+local function createButton()
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 0, 30)
+    button.Font = Enum.Font.GothamBold
+    button.TextSize = 13
+    button.TextColor3 = Color3.new(1, 1, 1)
+    button.BorderSizePixel = 0
+    button.Parent = Container
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = button
+
+    return button
+end
+
+-- =====================================
+-- TOGGLE CREATOR
+-- =====================================
+
+local function createToggle(label, property)
+    local button = createButton()
+
+    local function refresh()
+        local enabled = Settings[property]
+
+        button.Text =
+            label .. ": "
+            .. (enabled and "ON" or "OFF")
+
+        button.BackgroundColor3 = enabled
+            and Color3.fromRGB(25, 115, 75)
+            or Color3.fromRGB(65, 65, 70)
+    end
+
+    button.MouseButton1Click:Connect(function()
+        if property == "Enabled" then
+            toggleAimbot()
+        else
+            Settings[property] = not Settings[property]
+            clearTarget()
+            refresh()
+        end
+    end)
+
+    refresh()
+
+    -- Allow keyboard hotkeys to refresh GUI
+    return refresh
+end
+
+-- =====================================
+-- INPUT CREATOR
+-- =====================================
+
+local function createInput(labelText, initial, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 30)
+    row.BackgroundTransparency = 1
+    row.Parent = Container
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.52, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 12
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment =
+        Enum.TextXAlignment.Left
+    label.Parent = row
+
+    local input = Instance.new("TextBox")
+    input.Size = UDim2.new(0.48, 0, 1, 0)
+    input.Position = UDim2.new(0.52, 0, 0, 0)
+    input.BackgroundColor3 =
+        Color3.fromRGB(55, 55, 60)
+    input.TextColor3 = Color3.new(1, 1, 1)
+    input.TextSize = 12
+    input.Font = Enum.Font.Gotham
+    input.ClearTextOnFocus = false
+    input.Text = tostring(initial)
+    input.Parent = row
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = input
+
+    input.FocusLost:Connect(function()
+        local value = tonumber(input.Text)
+
+        if value then
+            callback(value)
+        end
+
+        if labelText == "FOV Radius" then
+            input.Text = tostring(Settings.Fov)
+        else
+            input.Text = tostring(Settings.Smoothing)
+        end
+    end)
+end
+
+-- =====================================
+-- GUI CONTROLS
+-- =====================================
+
+ModeButton = createButton()
+
+ModeButton.BackgroundColor3 =
+    Color3.fromRGB(45, 90, 135)
+
+ModeButton.MouseButton1Click:Connect(function()
+    switchAimMode(1)
+end)
+
+updateModeButton()
+
+-- ENABLE BUTTON + KEYBOARD SYNC
+refreshAimbotButton =
+    createToggle("Enable Aimbot", "Enabled")
+
+createToggle("Team Check", "TeamCheck")
+createToggle("Wall Check", "WallCheck")
+createToggle("Show FOV", "ShowFov")
+
+createInput(
+    "FOV Radius",
+    Settings.Fov,
+    function(value)
+        Settings.Fov = math.clamp(value, 25, 600)
+        clearTarget()
+    end
+)
+
+createInput(
+    "Smooth Speed",
+    Settings.Smoothing,
+    function(value)
+        Settings.Smoothing = math.clamp(value, 0, 100)
+    end
+)
+
+local Info = Instance.new("TextLabel")
+Info.Size = UDim2.new(1, 0, 0, 24)
+Info.BackgroundTransparency = 1
+Info.Text =
+    "T: Toggle | V/B: Mode | RMB: Aim | Shift: Menu"
+Info.TextColor3 =
+    Color3.fromRGB(170, 170, 170)
+Info.TextSize = 10
+Info.Font = Enum.Font.Gotham
+Info.Parent = Container
+
+-- =====================================
+-- DRAGGABLE GUI
+-- =====================================
+
+local dragging = false
+local dragStart
+local startPosition
+local dragInput
+
+Title.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = true
+        dragStart = input.Position
+        startPosition = Main.Position
+    end
+end)
+
+Title.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragInput = input
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if dragging and input == dragInput then
+        local delta = input.Position - dragStart
+
+        Main.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = false
+    end
+end)
+
+-- =====================================
+-- KEYBOARD + MOUSE CONTROLS
+-- =====================================
+
+UIS.InputBegan:Connect(function(input, processed)
+    if processed or UIS:GetFocusedTextBox() then
+        return
+    end
+
+    -- T = TOGGLE AIMBOT
+    if input.KeyCode == Enum.KeyCode.T then
+        toggleAimbot()
+        return
+    end
+
+    -- B = NEXT AIM MODE
+    if input.KeyCode == Enum.KeyCode.B then
+        switchAimMode(1)
+        return
+    end
+
+    -- V = PREVIOUS AIM MODE
+    if input.KeyCode == Enum.KeyCode.V then
+        switchAimMode(-1)
+        return
+    end
+
+    -- RIGHT SHIFT = SHOW/HIDE GUI
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        Main.Visible = not Main.Visible
+        return
+    end
+
+    -- LEFT CLICK = REROLL RANDOM AIM PART
+    if input.UserInputType ==
+        Enum.UserInputType.MouseButton1 then
+
+        rerollAimPart()
+        return
+    end
+end)
+
+-- =====================================
+-- STARTUP
+-- =====================================
+
+print("[AIMBOT V7] Successfully loaded!")
+print("[AIMBOT V7] T = Toggle ON/OFF")
+print("[AIMBOT V7] B = Next Aim Mode")
+print("[AIMBOT V7] V = Previous Aim Mode")
+print("[AIMBOT V7] LMB = Random Part Reroll")
+print("[AIMBOT V7] RMB = Hold To Aim")
+print("[AIMBOT V7] Modes: Head, Body, Arms, Random")
